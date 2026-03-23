@@ -44,26 +44,23 @@ class Secrets : Plugin<Project> {
         // finalizeDsl runs *before* onVariants, so these are guaranteed to be populated.
         var allFlavorsPerDimension: Map<String, List<String>> = emptyMap()
         var allBuildTypes: List<String> = emptyList()
-
+        val taskNames = target.gradle.startParameter.taskNames
         fun collectVariantMetadata(commonExtension: CommonExtension) {
             allFlavorsPerDimension = commonExtension.productFlavors
                 .filter { it.dimension != null }
                 .groupBy(keySelector = { it.dimension!! }, valueTransform = { it.name })
             allBuildTypes = commonExtension.buildTypes.map { it.name }
 
-//            logger.info(
-//                "**********\nSecrets: finalizeDsl\nflavors={}\nbuildTypes={}\n**********",
-//                allFlavorsPerDimension,
-//                allBuildTypes,
-//            )
+            logger.info(
+                "**********\nTask Name: {}\nAll Flavors: {}\nAll Build Types: {}\n**********",
+                taskNames, allFlavorsPerDimension, allBuildTypes
+            )
         }
 
         appComponents?.finalizeDsl { collectVariantMetadata(it) }
         libComponents?.finalizeDsl { collectVariantMetadata(it) }
 
         component.onVariants { variant ->
-            val taskNames = target.gradle.startParameter.taskNames
-
             // Resolve whether the running task targets this variant.
             // Returns the variant name when matched, null when the task
             // carries no variant component (e.g. "clean", "lint", IDE sync).
@@ -75,23 +72,28 @@ class Secrets : Plugin<Project> {
             )
 
             // When a specific variant was requested and this is not it, skip.
-//            if (taskNames.isNotEmpty() && requestedVariant == null) {
-//                logger.info(
-//                    "**********\nSecrets: skipping variant '{}' — not targeted by tasks {}\n**********",
-//                    variant.name, taskNames,
-//                )
-//                return@onVariants
-//            }
+            if (taskNames.isNotEmpty() && requestedVariant == null) {
+                logger.info(
+                    "**********\nSecrets: skipping variant '{}' — not targeted by tasks {}\n**********",
+                    variant.name, taskNames,
+                )
+                return@onVariants
+            } else {
+                logger.info(
+                    "**********\nSecrets: using variant '{}' — targeted by tasks {}\n**********",
+                    variant.name, taskNames,
+                )
+            }
 
-            extension.variantSecretsMapping.get()
-                .forEach { (pattern, fileName) ->
-                    if (fileName.isNotBlank() && pattern.toRegex().containsMatchIn(variant.name)) {
-                        val fileProperties: Properties = loadProperties(
-                            fileName = fileName,
-                            rootDir = target.rootProject.projectDir
-                        )
-                    }
-                }
+//            extension.variantSecretsMapping.get()
+//                .forEach { (pattern, fileName) ->
+//                    if (fileName.isNotBlank() && pattern.toRegex().containsMatchIn(variant.name)) {
+//                        val fileProperties: Properties = loadProperties(
+//                            fileName = fileName,
+//                            rootDir = target.rootProject.projectDir
+//                        )
+//                    }
+//                }
         }
     }
 //                        resolveSecrets(
