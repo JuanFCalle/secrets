@@ -13,16 +13,24 @@ import org.gradle.api.logging.Logging
  *
  * ### How it works
  *
- * 1. For every flavour **dimension** a regex alternation of **all** flavors in
- *    that dimension is built (capitalised first char, sorted longest-first so
- *    that `MinApi24` is tried before `Min`).
- * 2. Each requested task name is searched with the regex.  If a flavor from
- *    that dimension is found it **must** equal the current variant's flavor;
- *    otherwise the task targets a different variant and the match fails.
- * 3. The same check is performed for **build types**.
- * 4. At least **one** variant component (any flavor or build type) must be
- *    present in the task name.  If none is found the task is not
- *    variant-specific (e.g. `clean`, `lint`) and `null` is returned.
+ * 1. **Full-name shortcut** – If the capitalised variant name (e.g.
+ *    `DemoMin24Debug`) appears verbatim inside any task name the variant is
+ *    immediately accepted.
+ *
+ * 2. **Per-dimension flavor check** – For every flavour dimension a regex
+ *    alternation of *all* flavors in that dimension is built (capitalised,
+ *    sorted longest-first so `MinApi24` is tried before `Min`).
+ *    - If a flavor from that dimension is **found** in the task name it
+ *      **must** equal the current variant's flavor; otherwise the variant is
+ *      rejected.
+ *    - If **no** flavor from that dimension is found the dimension is treated
+ *      as *unspecified* (the task does not filter by that dimension).
+ *
+ * 3. **Build-type check** – Same logic applied to the set of all build types.
+ *
+ * 4. **At least one component required** – If none of the flavors or the build
+ *    type was found in the task name the task is not variant-specific
+ *    (e.g. `clean`, `lint`) and `null` is returned.
  *
  * ### Limitations
  *
@@ -37,10 +45,11 @@ object VariantMatcher {
     private val logger = Logging.getLogger(VariantMatcher::class.java)
 
     /**
-     * Returns [variant] when at least one entry in [taskNames] targets the
-     * described variant, or `null` when no task carries variant information.
+     * Returns the [variant]'s name when at least one entry in [taskNames]
+     * targets that variant, or `null` when no task carries variant information.
      *
      * @param taskNames               `gradle.startParameter.taskNames`
+     * @param variant                 the variant under inspection
      * @param allFlavorsPerDimension  every dimension → list of flavor names
      * @param allBuildTypes           every build-type name
      */
@@ -50,7 +59,7 @@ object VariantMatcher {
         allFlavorsPerDimension: Map<String, List<String>>,
         allBuildTypes: List<String>,
     ): String? {
-        val matched: Boolean = taskNames.any { taskName ->
+        val matched = taskNames.any { taskName ->
             matchesVariant(
                 taskName = taskName.substringAfterLast(':'),
                 variant = variant,
@@ -61,165 +70,158 @@ object VariantMatcher {
         return variant.name.takeIf { matched }
     }
 
+    // ── core matching ──────────────────────────────────────────────────
+
+    /**
+     * Checks whether [taskName] (without module prefix) targets [variant].
+     *
+     * Three-valued per-component logic:
+     * - `true`  → component found **and** matches current variant
+     * - `false` → component found but belongs to a **different** variant
+     * - `null`  → component absent (dimension/build-type unspecified)
+     */
     private fun matchesVariant(
         taskName: String,
         variant: Variant,
         allFlavorsPerDimension: Map<String, List<String>>,
         allBuildTypes: List<String>,
     ): Boolean {
-        val variantName: String = variant.name
-        if (variantName.capitaliseFirst() in taskName) return true
+        // ── 1. Fast path: full capitalised variant name in task ──────
+        if (variant.name.capitaliseFirst() in taskName) {
+            logger.info("Task '{}' contains full variant name '{}'", taskName, variant.name)
+            return true
+        }
 
-        val flavorsMatch: Boolean? = checkFlavors(
+        // ── 2. Per-dimension flavor matching ────────────────────────
+        val flavorResult: Boolean? = matchFlavors(
             taskName = taskName,
-            variantName = variantName,
-            variantFlavors = variant.productFlavors,
-            allFlavorsPerDimension = allFlavorsPerDimension
+            variant = variant,
+            allFlavorsPerDimension = allFlavorsPerDimension,
         )
-        val buildTypeMatch: Boolean? = checkBuildType(
-            taskName = taskName,
-            variantName = variantName,
-            buildType = variant.buildType,
-            allBuildTypes = allBuildTypes
-        )
+        // Early exit: a flavor from some dimension was found but it
+        // belongs to a different variant.
+        if (flavorResult == false) return false
 
-        // A `null` result means "not specified in the task".
-        // A `false` means "specified but doesn't match current variant".
-        // A `true` means "specified and matches current variant".
-        if (flavorsMatch == false || buildTypeMatch == false) return false
-        val componentFound = flavorsMatch == true || buildTypeMatch == true
-        if (!componentFound) {
+        // ── 3. Build-type matching ──────────────────────────────────
+        val buildTypeResult: Boolean? = matchBuildType(
+            taskName = taskName,
+            variant = variant,
+            allBuildTypes = allBuildTypes,
+        )
+        if (buildTypeResult == false) return false
+
+        // ── 4. At least one component must have been present ────────
+        val hasAnyComponent = flavorResult == true || buildTypeResult == true
+        if (!hasAnyComponent) {
             logger.info(
-                "**********\nTask '{}' carries no variant component for '{}'\n**********",
-                taskName, variantName,
+                "Task '{}' carries no variant component — not variant-specific",
+                taskName,
             )
         }
-        return componentFound
+        return hasAnyComponent
     }
 
+    // ── flavor matching ────────────────────────────────────────────────
+
     /**
-     * Checks every flavour dimension in the task name.
+     * Inspects every flavour dimension independently.
      *
-     * @return `true`  — at least one dimension's flavor was found and matches
-     *         `false` — a dimension's flavor was found but conflicts
-     *         `null`  — no flavor from any dimension was found (unspecified)
+     * @return `true`  if ≥ 1 dimension's flavor was found **and** all found
+     *                 flavors match the variant
+     *         `false` if any dimension's flavor was found but **conflicts**
+     *         `null`  if no flavor from any dimension appears in [taskName]
      */
-    private fun checkFlavors(
+    private fun matchFlavors(
         taskName: String,
-        variantName: String,
-        variantFlavors: List<Pair<String, String>>,
+        variant: Variant,
         allFlavorsPerDimension: Map<String, List<String>>,
     ): Boolean? {
-        logger.info(
-            "\n\n\n**********\nChecking Target [ {} ] Flavors for Variant [ {} ]\n**********\n\n",
-            taskName, variantName
-        )
         var anyFound = false
-        for ((index, flavorDimension) in variantFlavors.withIndex()) {
-            val (dimension, variantFlavor) = flavorDimension
-            val flavorsInVariantDimension = allFlavorsPerDimension[dimension] ?: continue
-            logger.info(
-                "**********\nVariant [ {} ]\nChecking Flavors [ {} ]\nIn Task [ {} ]",
-                variantName, flavorsInVariantDimension, taskName
-            )
-            val pattern = flavorsInVariantDimension.toRegexPattern() ?: continue
-            pattern.find(taskName).let {
-                if (it == null) {
-                    logger.info(
-                        "**********\nNO FLAVOR FOUND\n**********\n\n\n",
-                    )
-                    continue
-                } else {
-                    val capitalizedFlavor = variantFlavor.capitaliseFirst()
-                    logger.info(
-                        "**********\nFOUND\nFlavor [ {} ]\n",
-                        it.value,
-                    )
-                    if (it.value != capitalizedFlavor) {
-                        logger.info(
-                            "**********\nMatch Dimension --- Skip Variant\n**********\n",
-                        )
-                        return false
-                    } else {
-                        logger.info(
-                            "**********\nMatch Target Flavor --> Keep searching in variant\n**********\n",
-                        )
-                    }
-                    anyFound = true
-                }
+
+        for ((dimension, variantFlavor) in variant.productFlavors) {
+            val allFlavors: List<String> =
+                allFlavorsPerDimension[dimension] ?: continue
+            val pattern: Regex = allFlavors.toAlternationRegex() ?: continue
+
+            val match = pattern.find(taskName)
+            if (match == null) {
+                // Dimension is not specified in the task — that's fine.
+                logger.info(
+                    "Dimension '{}': no flavor found in task '{}'",
+                    dimension, taskName,
+                )
+                continue
             }
-        }
-        return if (anyFound) true else {
+
+            val expected = variantFlavor.capitaliseFirst()
+            if (match.value != expected) {
+                logger.info(
+                    "Dimension '{}': found '{}' but variant needs '{}' — skip",
+                    dimension, match.value, expected,
+                )
+                return false
+            }
+
             logger.info(
-                "**********\nNO FLAVORS IN TASK\n**********",
+                "Dimension '{}': flavor '{}' matches variant",
+                dimension, match.value,
             )
-            null
+            anyFound = true
         }
+
+        return if (anyFound) true else null
     }
 
+    // ── build-type matching ────────────────────────────────────────────
 
     /**
-     * Checks whether the task name contains a build-type component.
-     *
-     * @return `true`  — build type found and matches
-     *         `false` — build type found but conflicts
-     *         `null`  — no build type found (unspecified)
+     * @return `true`  if a build type is found **and** matches the variant
+     *         `false` if a build type is found but **conflicts**
+     *         `null`  if no build type appears in [taskName]
      */
-    private fun checkBuildType(
+    private fun matchBuildType(
         taskName: String,
-        variantName: String,
-        buildType: String?,
+        variant: Variant,
         allBuildTypes: List<String>,
     ): Boolean? {
-        logger.info(
-            "\n\n\n**********\nChecking Target [ {} ] Build Type for Variant [ {} ]\n**********\n",
-            taskName, variantName
-        )
-        if (buildType == null || allBuildTypes.isEmpty()) return null
-        val pattern = allBuildTypes.toRegexPattern() ?: return null
+        val buildType: String = variant.buildType ?: return null
+        if (allBuildTypes.isEmpty()) return null
 
-        pattern.find(taskName).let {
-            if (it == null) {
-                logger.info(
-                    "**********\nNO BUILD TYPE FOUND\n**********\n\n\n",
-                )
-                return null
-            } else {
-                val capitalizedBuildType = buildType.capitaliseFirst()
-                logger.info(
-                    "**********\nFOUND BUILD TYPE\nTarget Build Type [ {} ]\nCurrent Build Type [ {} ]\n",
-                    it.value, capitalizedBuildType
-                )
-                if (it.value != capitalizedBuildType) {
-                    logger.info(
-                        "**********\nNot in current Variant --- Skip Variant\n**********\n",
-                    )
-                    return false
-                } else {
-                    logger.info(
-                        "\n\n\n**********\nMatch Build Type Target -->  Use this variant\n**********\n",
-                    )
-                    return true
-                }
-            }
+        val pattern: Regex = allBuildTypes.toAlternationRegex() ?: return null
+        val match = pattern.find(taskName) ?: run {
+            logger.info("No build type found in task '{}'", taskName)
+            return null
+        }
+
+        val expected = buildType.capitaliseFirst()
+        return if (match.value == expected) {
+            logger.info("Build type '{}' matches variant", match.value)
+            true
+        } else {
+            logger.info(
+                "Build type '{}' found but variant needs '{}' — skip",
+                match.value, expected,
+            )
+            false
         }
     }
 
-// ── helpers ────────────────────────────────────────────────────────
+    // ── helpers ────────────────────────────────────────────────────────
 
     /**
-     * Builds a regex alternation from the receiver list where every name is
+     * Builds a regex alternation from the receiver list.  Every name is
      * capitalised and alternatives are sorted **longest-first** so that
      * `MinApi24` is preferred over `Min` during matching.
+     *
+     * Example: `["demo", "full"]` → regex `Demo|Full`
      */
-    private fun List<String>.toRegexPattern(): Regex? {
+    private fun List<String>.toAlternationRegex(): Regex? {
         if (isEmpty()) return null
         return sortedByDescending { it.length }
-            .joinToString("|") { Regex.escape(it.capitaliseFirst()) }
+            .joinToString(separator = "|") { Regex.escape(it.capitaliseFirst()) }
             .toRegex()
     }
 
     private fun String.capitaliseFirst(): String =
         replaceFirstChar { if (it.isLowerCase()) it.uppercaseChar() else it }
 }
-

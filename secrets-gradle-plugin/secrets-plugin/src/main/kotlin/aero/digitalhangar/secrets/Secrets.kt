@@ -84,7 +84,6 @@ class Secrets : Plugin<Project> {
                     variant.name, taskNames,
                 )
             }
-
 //            extension.variantSecretsMapping.get()
 //                .forEach { (pattern, fileName) ->
 //                    if (fileName.isNotBlank() && pattern.toRegex().containsMatchIn(variant.name)) {
@@ -118,7 +117,6 @@ class Secrets : Plugin<Project> {
     }
 
     private fun resolveSecrets(
-        defaultsFileName: String,
         fileName: String,
         ignoreList: List<String>,
         properties: Properties,
@@ -133,16 +131,11 @@ class Secrets : Plugin<Project> {
             }
             .forEach { key ->
                 val value: String = properties.getProperty(key).removeSurrounding("\"")
-                if (fileName != defaultsFileName && (value.isBlank() || value == "placeholder")) {
+                if (value.isBlank() || value == "placeholder") {
                     throw GradleException(
                         "File '${fileName}' contains a wrong value for key '$key'."
                     )
                 }
-                logger.info(
-                    "Write:[key:[ {} ] Value:[ {} ]]",
-                    key,
-                    value
-                )
                 variant.buildConfigFields?.put(
                     key,
                     BuildConfigField("String", value.addQuotationMarks(), null)
