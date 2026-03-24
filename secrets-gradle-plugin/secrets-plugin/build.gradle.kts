@@ -19,6 +19,7 @@ kotlin {
 
 dependencies {
     implementation(libs.android.gradlePlugin)
+    testImplementation(kotlin("test"))
 }
 
 

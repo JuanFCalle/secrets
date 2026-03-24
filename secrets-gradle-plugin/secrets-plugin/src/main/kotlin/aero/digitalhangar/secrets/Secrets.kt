@@ -41,49 +41,38 @@ class Secrets : Plugin<Project> {
             )
 
         // Collect all flavors-per-dimension and build types once the DSL is finalised.
-        // finalizeDsl runs *before* onVariants, so these are guaranteed to be populated.
-        var allFlavorsPerDimension: Map<String, List<String>> = emptyMap()
-        var allBuildTypes: List<String> = emptyList()
+        // finalizeDsl runs *before* onVariants, so the matcher is guaranteed to be
+        // fully initialised before any variant callback fires.
         val taskNames = target.gradle.startParameter.taskNames
+        var variantMatcher: VariantMatcher? = null
+
         fun collectVariantMetadata(commonExtension: CommonExtension) {
-            allFlavorsPerDimension = commonExtension.productFlavors
+            val allFlavorsPerDimension = commonExtension.productFlavors
                 .filter { it.dimension != null }
                 .groupBy(keySelector = { it.dimension!! }, valueTransform = { it.name })
-            allBuildTypes = commonExtension.buildTypes.map { it.name }
+            val allBuildTypes = commonExtension.buildTypes.map { it.name }
 
-            logger.info(
-                "**********\nTask Name: {}\nAll Flavors: {}\nAll Build Types: {}\n**********",
-                taskNames, allFlavorsPerDimension, allBuildTypes
-            )
+            // Pre-parse task names once — all regex work happens here.
+            variantMatcher = VariantMatcher(taskNames, allFlavorsPerDimension, allBuildTypes)
         }
 
         appComponents?.finalizeDsl { collectVariantMetadata(it) }
         libComponents?.finalizeDsl { collectVariantMetadata(it) }
 
         component.onVariants { variant ->
-            // Resolve whether the running task targets this variant.
-            // Returns the variant name when matched, null when the task
-            // carries no variant component (e.g. "clean", "lint", IDE sync).
-            val requestedVariant: String? = VariantMatcher.resolveRequestedVariant(
-                taskNames = taskNames,
-                variant = variant,
-                allFlavorsPerDimension = allFlavorsPerDimension,
-                allBuildTypes = allBuildTypes,
-            )
-
-            // When a specific variant was requested and this is not it, skip.
-            if (taskNames.isNotEmpty() && requestedVariant == null) {
+            if (variantMatcher?.resolveVariant(variant) == null) {
                 logger.info(
-                    "**********\nSecrets: skipping variant '{}' — not targeted by tasks {}\n**********",
-                    variant.name, taskNames,
+                    "** NO MATCHING VARIANT **\nTask '{}'\nVariant '{}'\n",
+                    taskNames,
+                    variant.name,
                 )
                 return@onVariants
-            } else {
-                logger.info(
-                    "**********\nSecrets: using variant '{}' — targeted by tasks {}\n**********",
-                    variant.name, taskNames,
-                )
             }
+            logger.info(
+                "** MATCHING VARIANT **\nTask '{}'\nVariant '{}'\n",
+                taskNames,
+                variant.name,
+            )
 //            extension.variantSecretsMapping.get()
 //                .forEach { (pattern, fileName) ->
 //                    if (fileName.isNotBlank() && pattern.toRegex().containsMatchIn(variant.name)) {
