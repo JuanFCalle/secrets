@@ -224,22 +224,11 @@ class VariantMatcher(
     private fun List<String>.toAlternationRegex(): Regex? {
         if (isEmpty()) return null
         return sortedByDescending { it.length }
-            .joinToString(separator = "|")
-            {
-                Regex.escape(it.capitaliseFirst())
-//                Regex.escape(it.apply { replaceFirstChar { char -> char.uppercaseChar() } })
-            }
-            .also {
-                logger.info(
-                    "-- Regex Alternation --\nRegex {}\n",
-                    it
-                )
+            .joinToString(separator = "|") {
+                Regex.escape(it.run { replaceFirstChar { char -> char.uppercaseChar() } })
             }
             .toRegex()
     }
-
-    private fun String.capitaliseFirst(): String =
-        replaceFirstChar { if (it.isLowerCase()) it.uppercaseChar() else it }
 
     private companion object {
         private val logger = Logging.getLogger(VariantMatcher::class.java)
